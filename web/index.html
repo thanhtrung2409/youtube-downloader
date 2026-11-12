@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube to MP3</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e5372b'/%3E%3Cpath d='M13 8v11.2A4 4 0 1 0 15 23V13h6V8z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --field: #ffffff;
+    --text: #1f2328;
+    --muted: #636c76;
+    --border: #d5dae0;
+    --accent: #e5372b;
+    --accent-hover: #c92a1f;
+    --accent-text: #ffffff;
+    --ok: #1a7f37;
+    --error: #cf222e;
+    --warn-bg: #fff8c5;
+    --warn-text: #6b5300;
+    --error-bg: #ffebe9;
+    --track: #e7eaee;
+    --focus: #0969da;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --card: #161b22;
+      --field: #0d1117;
+      --text: #e6edf3;
+      --muted: #8d96a0;
+      --border: #30363d;
+      --accent: #f0483c;
+      --accent-hover: #ff6155;
+      --ok: #3fb950;
+      --error: #ff7b72;
+      --warn-bg: #3a2f00;
+      --warn-text: #f2cc60;
+      --error-bg: #4a1714;
+      --track: #262c35;
+      --focus: #4493f8;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px 56px; }
+  header { display: flex; gap: 14px; align-items: center; margin-bottom: 22px; }
+  header svg { flex: none; }
+  h1 { font-size: 24px; line-height: 1.2; margin: 0; }
+  .muted { color: var(--muted); }
+  header p { margin: 2px 0 0; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    margin-bottom: 16px;
+  }
+  .field { margin: 0 0 18px; border: 0; padding: 0; min-width: 0; }
+  .label-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .label-row .ghost { margin-left: auto; }
+  .label, legend { font-weight: 600; padding: 0; }
+  legend { margin-bottom: 6px; }
+
+  textarea, input[type=text] {
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    background: var(--field);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+  }
+  textarea { resize: vertical; min-height: 104px; font-size: 14px; white-space: pre; overflow-x: auto; }
+  textarea:focus-visible, input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; min-width: 0; }
+
+  button {
+    font: inherit;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: var(--track); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { padding: 3px 10px; font-size: 13px; }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+    font-weight: 600;
+    padding: 10px 26px;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+  .choices { display: flex; flex-wrap: wrap; gap: 8px; }
+  .choice {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; cursor: pointer;
+  }
+  .choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .choice small { color: var(--muted); }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 8px; cursor: pointer; }
+  .check input { margin-top: 4px; }
+  input[type=radio], input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
+
+  .actions { display: flex; align-items: center; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+  .hint { font-size: 13px; }
+  .form-error { color: var(--error); margin: 12px 0 0; }
+  .form-error:empty { display: none; }
+
+  .banner { border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+  .banner.error { background: var(--error-bg); color: var(--error); }
+  .banner.warn { background: var(--warn-bg); color: var(--warn-text); }
+
+  .status { display: flex; flex-direction: column; margin-bottom: 10px; min-width: 0; }
+  .status strong { font-size: 16px; }
+  .status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 8px; border-radius: 99px; background: var(--track); overflow: hidden; margin-bottom: 14px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .25s ease; }
+  .bar.done > div { background: var(--ok); }
+  .bar.busy > div { width: 30%; animation: slide 1.3s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  @media (prefers-reduced-motion: reduce) { .bar.busy > div { animation: none; width: 100%; opacity: .4; } }
+
+  .log {
+    list-style: none; margin: 0; padding: 10px 12px;
+    max-height: 300px; overflow: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--field);
+    font-size: 14px;
+  }
+  .log li { display: flex; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
+  .log li::before { flex: none; width: 1em; text-align: center; }
+  .log li.info::before { content: "•"; color: var(--muted); }
+  .log li.ok { color: var(--ok); }
+  .log li.ok::before { content: "✓"; }
+  .log li.skip { color: var(--muted); }
+  .log li.skip::before { content: "↷"; }
+  .log li.error { color: var(--error); }
+  .log li.error::before { content: "✕"; }
+
+  @media (max-width: 560px) {
+    main { padding-top: 24px; }
+    .card { padding: 18px 16px; }
+    .row { flex-wrap: wrap; }
+    .row input { flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg width="44" height="44" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="8" fill="#e5372b"/>
+      <path d="M13 8v11.2A4 4 0 1 0 15 23V13h6V8z" fill="#fff"/>
+    </svg>
+    <div>
+      <h1>YouTube to MP3</h1>
+      <p class="muted">Best-quality MP3 from YouTube videos and playlists. Each playlist is saved in its own folder.</p>
+    </div>
+  </header>
+
+  <div id="problems"></div>
+
+  <form class="card" id="form" novalidate>
+    <div class="field">
+      <div class="label-row">
+        <label class="label" for="urls">YouTube links</label>
+        <span class="muted hint">one per line</span>
+        <button type="button" class="ghost" id="paste">Paste</button>
+      </div>
+      <textarea id="urls" rows="4" spellcheck="false" autofocus
+        placeholder="https://www.youtube.com/watch?v=…&#10;https://www.youtube.com/playlist?list=…"></textarea>
+    </div>
+
+    <div class="field">
+      <div class="label-row"><label class="label" for="out">Save to</label></div>
+      <div class="row">
+        <input id="out" type="text" spellcheck="false" autocomplete="off">
+        <button type="button" id="browse">Browse…</button>
+        <button type="button" id="open">Open</button>
+      </div>
+    </div>
+
+    <fieldset class="field">
+      <legend>Quality</legend>
+      <div class="choices">
+        <label class="choice"><input type="radio" name="quality" value="320" checked> 320 kbps <small>best</small></label>
+        <label class="choice"><input type="radio" name="quality" value="vbr"> V0 VBR <small>smaller, sounds the same</small></label>
+      </div>
+    </fieldset>
+
+    <label class="check"><input type="checkbox" id="no_playlist">
+      <span>For a video link inside a playlist, download only that video</span></label>
+    <label class="check"><input type="checkbox" id="keep_source">
+      <span>Also keep the original audio file <span class="muted">(Opus/M4A, not re-encoded)</span></span></label>
+
+    <div class="actions">
+      <button type="submit" class="primary" id="start">Download</button>
+      <button type="button" id="cancel" disabled>Cancel</button>
+      <span class="muted hint">Ctrl+Enter</span>
+    </div>
+    <p class="form-error" id="formError" role="alert"></p>
+  </form>
+
+  <section class="card" id="progress" hidden aria-live="polite">
+    <div class="status">
+      <strong id="status"></strong>
+      <span class="muted" id="detail"></span>
+    </div>
+    <div class="bar" id="bar"><div></div></div>
+    <ul class="log" id="log"></ul>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TITLE = 'YouTube to MP3';
+let jobId = 0, logNext = 0, pollTimer = null;
+
+async function api(path, body) {
+  let res;
+  try {
+    res = await fetch(path, body === undefined ? {} : {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error('The YouTube to MP3 window was closed. Start it again, then reload this page.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Something went wrong (${res.status}).`);
+  return data;
+}
+
+function showError(message) { $('formError').textContent = message || ''; }
+
+function showProblems(blocking, warnings) {
+  const box = $('problems');
+  box.replaceChildren();
+  for (const [list, kind] of [[blocking, 'error'], [warnings, 'warn']]) {
+    for (const text of list) {
+      const div = document.createElement('div');
+      div.className = `banner ${kind}`;
+      div.textContent = text;
+      box.append(div);
+    }
+  }
+}
+
+function addLog(kind, text) {
+  const log = $('log');
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  const li = document.createElement('li');
+  li.className = kind;
+  li.textContent = text;
+  log.append(li);
+  if (nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+function setBar(percent, state) {
+  const bar = $('bar');
+  bar.classList.toggle('busy', percent === null && state !== 'done' && state !== 'cancelled' && state !== 'failed');
+  bar.classList.toggle('done', state === 'done');
+  bar.firstElementChild.style.width = percent === null ? '' : `${percent}%`;
+}
+
+function setRunning(running) {
+  $('start').disabled = running;
+  $('cancel').disabled = !running;
+}
+
+function render(job) {
+  if (job.id !== jobId) {
+    jobId = job.id;
+    $('log').replaceChildren();
+  }
+  logNext = job.log_next;
+  for (const [kind, text] of job.log) addLog(kind, text);
+  $('progress').hidden = false;
+
+  const running = job.state === 'running' || job.state === 'cancelling';
+  if (running) {
+    const counter = job.count ? `${job.item} of ${job.count} · ` : '';
+    const percent = job.percent === null ? '' : ` ${Math.round(job.percent)}%`;
+    $('status').textContent = counter + job.phase + percent;
+    $('detail').textContent = job.title || job.playlist || '';
+    setBar(job.percent, job.state);
+    document.title = job.percent === null ? TITLE : `${Math.round(job.percent)}% · ${TITLE}`;
+  } else {
+    $('status').textContent = job.phase;
+    $('detail').textContent = job.new ? `Saved in ${job.out}` : '';
+    setBar(job.state === 'done' ? 100 : 0, job.state);
+    document.title = TITLE;
+  }
+  setRunning(running);
+  return running;
+}
+
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const state = await api(`/api/state?job=${jobId}&log_from=${logNext}`);
+    if (state.job && render(state.job)) pollTimer = setTimeout(poll, 400);
+  } catch (e) {
+    showError(e.message);
+    setRunning(false);
+  }
+}
+
+async function start() {
+  showError('');
+  try {
+    const res = await api('/api/download', {
+      urls: $('urls').value,
+      out: $('out').value,
+      vbr: document.querySelector('input[name=quality]:checked').value === 'vbr',
+      no_playlist: $('no_playlist').checked,
+      keep_source: $('keep_source').checked,
+    });
+    jobId = res.id;
+    logNext = 0;
+    $('log').replaceChildren();
+    for (const word of res.rejected) addLog('error', `Ignored, not a link: ${word}`);
+    setRunning(true);
+    poll();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+$('form').addEventListener('submit', (e) => { e.preventDefault(); start(); });
+$('form').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !$('start').disabled) { e.preventDefault(); start(); }
+});
+
+$('cancel').addEventListener('click', async () => {
+  $('cancel').disabled = true;
+  try { await api('/api/cancel', {}); } catch (e) { showError(e.message); }
+});
+
+$('paste').addEventListener('click', async () => {
+  const urls = $('urls');
+  try {
+    const text = (await navigator.clipboard.readText()).trim();
+    if (text) urls.value = urls.value.trim() ? `${urls.value.trimEnd()}\n${text}` : text;
+  } catch {
+    showError('Your browser blocked reading the clipboard. Click in the box and press Ctrl+V instead.');
+  }
+  urls.focus();
+});
+
+$('browse').addEventListener('click', async () => {
+  const button = $('browse');
+  button.disabled = true;
+  button.textContent = 'Choosing…';
+  showError('');
+  try {
+    const { path } = await api('/api/pick-folder', { initial: $('out').value });
+    if (path) $('out').value = path;
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Browse…';
+  }
+});
+
+$('open').addEventListener('click', async () => {
+  showError('');
+  try { await api('/api/open-folder', { path: $('out').value }); } catch (e) { showError(e.message); }
+});
+
+(async () => {
+  try {
+    const state = await api('/api/state');
+    const s = state.settings;
+    $('out').value = s.out;
+    document.querySelector(`input[name=quality][value="${s.vbr ? 'vbr' : '320'}"]`).checked = true;
+    $('no_playlist').checked = s.no_playlist;
+    $('keep_source').checked = s.keep_source;
+    showProblems(state.blocking, state.warnings);
+    if (state.job && render(state.job)) poll();  // a download started earlier, e.g. before a reload
+  } catch (e) {
+    showError(e.message);
+  }
+})();
+</script>
+</body>
+</html>

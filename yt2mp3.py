@@ -28,18 +28,23 @@ playlist again only downloads what was added since.
 
 Requires: yt-dlp (`py -m pip install -r requirements.txt`), ffmpeg on PATH,
 and a JavaScript runtime (Deno recommended) for YouTube's signature checks.
+
+The desktop app (yt2mp3_gui.pyw) and the local web app (yt2mp3_web.py) are
+front-ends for download() below.
 """
 
 import argparse
 import os
 import shutil
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
     import yt_dlp
-except ImportError:
-    sys.exit('yt-dlp is not installed. Run: py -m pip install -r requirements.txt')
+except ImportError:  # reported by missing_requirements()
+    yt_dlp = None
 
 DEFAULT_OUT = Path.home() / 'Music' / 'yt2mp3'
 
@@ -48,12 +53,53 @@ DEFAULT_OUT = Path.home() / 'Music' / 'yt2mp3'
 TEMPLATE = '%(playlist_title|.)s/%(playlist_index&{:02d} - |)s%(title)s.%(ext)s'
 
 
-def build_argv(a: argparse.Namespace, out: Path) -> list[str]:
+def refresh_path() -> None:
+    """Add PATH entries saved in the registry since this process started.
+
+    A tool installed with winget a minute ago is otherwise invisible until the
+    terminal (or Explorer, for a shortcut) is restarted.
+    """
+    if sys.platform != 'win32':
+        return
+    import winreg
+
+    current = [p for p in os.environ.get('PATH', '').split(os.pathsep) if p]
+    seen = {p.rstrip('\\').lower() for p in current}
+    for root, key in ((winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'),
+                      (winreg.HKEY_CURRENT_USER, 'Environment')):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                value = winreg.QueryValueEx(k, 'Path')[0]
+        except OSError:
+            continue
+        for p in os.path.expandvars(value).split(os.pathsep):
+            if p and p.rstrip('\\').lower() not in seen:
+                seen.add(p.rstrip('\\').lower())
+                current.append(p)
+    os.environ['PATH'] = os.pathsep.join(current)
+
+
+def missing_requirements() -> tuple[list[str], list[str]]:
+    """Return (blocking problems, warnings) about the tools yt2mp3 needs."""
+    blocking, warnings = [], []
+    if yt_dlp is None:
+        blocking.append('yt-dlp is not installed. Run: py -m pip install -r requirements.txt')
+    if not shutil.which('ffmpeg'):
+        blocking.append('FFmpeg was not found. Install it with: winget install Gyan.FFmpeg')
+    if not shutil.which('deno'):
+        warnings.append('Deno was not found, so some YouTube videos may fail. '
+                        'Install it with: winget install DenoLand.Deno')
+    return blocking, warnings
+
+
+def build_argv(urls: list[str], out: Path, *, vbr: bool = False, keep_source: bool = False,
+               no_playlist: bool = False, items: str | None = None,
+               cookies_from_browser: str | None = None, batch_file: str | None = None) -> list[str]:
     argv = [
         # Best audio-only stream; fall back to the best muxed file if a video has none.
         '--format', 'bestaudio/best',
         '--extract-audio', '--audio-format', 'mp3',
-        '--audio-quality', '0' if a.vbr else '320K',
+        '--audio-quality', '0' if vbr else '320K',
         '--embed-metadata', '--embed-thumbnail', '--convert-thumbnails', 'jpg',
         '--paths', str(out),
         '--output', TEMPLATE,
@@ -61,17 +107,71 @@ def build_argv(a: argparse.Namespace, out: Path) -> list[str]:
         # A playlist titled "." or ".." would otherwise write outside the output folder.
         '--replace-in-metadata', 'playlist_title', r'^\.+$', '_',
         '--ignore-errors', '--no-overwrites', '--windows-filenames',
-        '--no-playlist' if a.no_playlist else '--yes-playlist',
+        '--no-playlist' if no_playlist else '--yes-playlist',
     ]
-    if a.items:
-        argv += ['--playlist-items', a.items]
-    if a.keep_source:
+    if items:
+        argv += ['--playlist-items', items]
+    if keep_source:
         argv.append('--keep-video')
-    if a.cookies_from_browser:
-        argv += ['--cookies-from-browser', a.cookies_from_browser]
-    if a.batch_file:
-        argv += ['--batch-file', a.batch_file]
-    return argv + a.urls
+    if cookies_from_browser:
+        argv += ['--cookies-from-browser', cookies_from_browser]
+    if batch_file:
+        argv += ['--batch-file', batch_file]
+    return argv + list(urls)
+
+
+@dataclass
+class Result:
+    new: list[str] = field(default_factory=list)      # MP3s created by this run
+    skipped: list[str] = field(default_factory=list)  # MP3s that were already there
+    code: int = 0                                     # yt-dlp's exit code; 1 if any item failed
+
+
+def download(urls: list[str], out: Path, *, logger=None,
+             progress_hook: Callable[[dict], None] | None = None,
+             postprocessor_hook: Callable[[dict], None] | None = None,
+             on_file: Callable[[str, bool], None] | None = None,
+             **options) -> Result:
+    """Download urls (plus any options['batch_file']) as MP3 into out.
+
+    options are build_argv()'s keyword options. logger and the hooks are passed
+    to yt-dlp; a hook may raise yt_dlp.utils.DownloadCancelled to stop.
+    on_file(path, is_new) is called for every finished MP3.
+    """
+    if yt_dlp is None:
+        raise RuntimeError('yt-dlp is not installed')
+    out = out.expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    parsed = yt_dlp.parse_options(build_argv(urls, out, **options))
+    params = dict(parsed.ydl_opts)
+    if logger:
+        params.update(logger=logger, noprogress=True)
+
+    def key(path) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    # Files land in out or one playlist folder below it.
+    existed = {key(f) for pattern in ('*.mp3', '*/*.mp3') for f in out.glob(pattern)}
+    result = Result()
+
+    def on_saved(path: str) -> None:
+        # Also fires for tracks skipped because their MP3 was already there.
+        is_new = key(path) not in existed
+        (result.new if is_new else result.skipped).append(path)
+        # --keep-video also stops yt-dlp deleting the raw thumbnail; it is already embedded.
+        for ext in ('.webp', '.jpg', '.png'):
+            Path(path).with_suffix(ext).unlink(missing_ok=True)
+        if on_file:
+            on_file(path, is_new)
+
+    with yt_dlp.YoutubeDL(params) as ydl:
+        ydl.add_post_hook(on_saved)  # called with the final path after all post-processing
+        if progress_hook:
+            ydl.add_progress_hook(progress_hook)
+        if postprocessor_hook:
+            ydl.add_postprocessor_hook(postprocessor_hook)
+        result.code = ydl.download(parsed.urls)
+    return result
 
 
 def main() -> int:
@@ -101,45 +201,32 @@ def main() -> int:
 
     if not a.urls and not a.batch_file:
         p.error('give at least one URL or --batch-file')
-    if not shutil.which('ffmpeg'):
-        sys.exit('ffmpeg was not found on PATH. Install it with: winget install Gyan.FFmpeg')
+    refresh_path()
+    blocking, _ = missing_requirements()  # yt-dlp prints its own warning when Deno is missing
+    if blocking:
+        sys.exit('\n'.join(blocking))
 
     out = a.out.expanduser().resolve()
-    out.mkdir(parents=True, exist_ok=True)
-
-    parsed = yt_dlp.parse_options(build_argv(a, out))
-    existed = {str(f) for f in out.rglob('*.mp3')}
-    saved: list[str] = []
-
-    def on_saved(path: str) -> None:
-        saved.append(path)
-        # --keep-video also stops yt-dlp deleting the raw thumbnail; it is already embedded.
-        for ext in ('.webp', '.jpg', '.png'):
-            Path(path).with_suffix(ext).unlink(missing_ok=True)
-
     try:
-        with yt_dlp.YoutubeDL(parsed.ydl_opts) as ydl:
-            ydl.add_post_hook(on_saved)  # called with the final path after all post-processing
-            code = ydl.download(parsed.urls)
+        result = download(a.urls, out, vbr=a.vbr, keep_source=a.keep_source,
+                          no_playlist=a.no_playlist, items=a.items,
+                          cookies_from_browser=a.cookies_from_browser, batch_file=a.batch_file)
     except KeyboardInterrupt:
         print('\nCancelled.')
         return 130
 
-    # The post hook also fires for tracks skipped because their MP3 was already there.
-    new = [f for f in saved if f not in existed]
-    skipped = len(saved) - len(new)
     print()
-    if new:
-        print(f'Saved {len(new)} new file(s) to {out}:')
-        for f in new:
+    if result.new:
+        print(f'Saved {len(result.new)} new file(s) to {out}:')
+        for f in result.new:
             print(f'  {os.path.relpath(f, out)}')
     else:
         print('Nothing new was saved.')
-    if skipped:
-        print(f'Skipped {skipped} already downloaded.')
-    if code:
+    if result.skipped:
+        print(f'Skipped {len(result.skipped)} already downloaded.')
+    if result.code:
         print('Some items failed; see the errors above.')
-    return code
+    return result.code
 
 
 if __name__ == '__main__':
