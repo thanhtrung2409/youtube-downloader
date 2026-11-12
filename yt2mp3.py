@@ -136,7 +136,8 @@ def download(urls: list[str], out: Path, *, logger=None,
 
     options are build_argv()'s keyword options. logger and the hooks are passed
     to yt-dlp; a hook may raise yt_dlp.utils.DownloadCancelled to stop.
-    on_file(path, is_new) is called for every finished MP3.
+    on_file(path, is_new) is called for every MP3, whether just saved (True)
+    or skipped because it was already there (False).
     """
     if yt_dlp is None:
         raise RuntimeError('yt-dlp is not installed')
@@ -146,23 +147,34 @@ def download(urls: list[str], out: Path, *, logger=None,
     params = dict(parsed.ydl_opts)
     if logger:
         params.update(logger=logger, noprogress=True)
-
-    def key(path) -> str:
-        return os.path.normcase(os.path.abspath(path))
-
-    # Files land in out or one playlist folder below it.
-    existed = {key(f) for pattern in ('*.mp3', '*/*.mp3') for f in out.glob(pattern)}
     result = Result()
 
+    def skip_existing(info, *, incomplete: bool) -> str | None:
+        # Runs before anything is downloaded or written, so an MP3 that is already there
+        # is left exactly as it is (tags you edited included). Playlist entries are first
+        # checked from the playlist listing alone (incomplete=True), so those videos are
+        # not even opened.
+        if not info.get('title') or (incomplete and info.get('playlist_index') is None):
+            # yt-dlp also peeks at playlist entries before it attaches the playlist (and so
+            # the folder) to them; those are checked again once it has.
+            return None
+        path = ydl.prepare_filename({**info, 'ext': 'mp3'})
+        if not os.path.exists(path):
+            return None
+        result.skipped.append(path)
+        if on_file:
+            on_file(path, False)
+        return f'Already downloaded: {os.path.relpath(path, out)}'
+
+    params['match_filter'] = skip_existing
+
     def on_saved(path: str) -> None:
-        # Also fires for tracks skipped because their MP3 was already there.
-        is_new = key(path) not in existed
-        (result.new if is_new else result.skipped).append(path)
+        result.new.append(path)
         # --keep-video also stops yt-dlp deleting the raw thumbnail; it is already embedded.
         for ext in ('.webp', '.jpg', '.png'):
             Path(path).with_suffix(ext).unlink(missing_ok=True)
         if on_file:
-            on_file(path, is_new)
+            on_file(path, True)
 
     with yt_dlp.YoutubeDL(params) as ydl:
         ydl.add_post_hook(on_saved)  # called with the final path after all post-processing

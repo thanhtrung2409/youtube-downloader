@@ -14,7 +14,7 @@ Music/yt2mp3/
     └── ...
 ```
 
-Downloading again skips tracks whose MP3 is already there, so re-running a playlist fetches only what was added since.
+Downloading again skips tracks whose MP3 is already in that folder, and leaves those files exactly as they are (tags you edited stay). Re-running a playlist is quick and fetches only what was added since; delete an MP3 to get it again.
 
 There are three ways to use it, all with the same engine: a **desktop app**, a **web app** that runs on your own PC, and a **command line**.
 
