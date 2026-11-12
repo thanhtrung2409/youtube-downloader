@@ -23,6 +23,13 @@ COLORS = {'ok': '#1a7f37', 'skip': '#6e7781', 'error': '#cf222e', 'info': '#2429
 ICONS = {'ok': '✓', 'skip': '↷', 'error': '✕', 'info': '•'}
 
 
+def track_line(a: dict) -> str:
+    """One line per track being worked on, e.g. "Downloading 45% · Song title"."""
+    title = a['title'] if len(a['title']) <= 70 else a['title'][:69] + '…'
+    percent = f" {a['percent']:.0f}%" if a['percent'] is not None else ''
+    return f"{a['phase']}{percent} · {title}"
+
+
 class App:
     POLL_MS = 150
 
@@ -36,6 +43,7 @@ class App:
         self.vbr = tk.BooleanVar(value=s['vbr'])
         self.keep_source = tk.BooleanVar(value=s['keep_source'])
         self.no_playlist = tk.BooleanVar(value=s['no_playlist'])
+        self.workers = tk.StringVar(value=str(s['workers']))
         self.status = tk.StringVar(value='Paste a YouTube link, then press Download.')
         self.detail = tk.StringVar()
 
@@ -96,6 +104,13 @@ class App:
         ttk.Radiobutton(quality, text='320 kbps (best)', variable=self.vbr, value=False).pack(side='left')
         ttk.Radiobutton(quality, text='V0 VBR (smaller, sounds the same)', variable=self.vbr,
                         value=True).pack(side='left', padx=(12, 0))
+        at_once = ttk.Frame(f)
+        at_once.grid(row=next(row), column=0, sticky='w', pady=(8, 0))
+        ttk.Label(at_once, text='At once', font=bold).pack(side='left', padx=(0, 12))
+        ttk.Spinbox(at_once, from_=1, to=yt2mp3.MAX_WORKERS, width=3, textvariable=self.workers,
+                    state='readonly').pack(side='left')
+        ttk.Label(at_once, text='  tracks at a time (3–4 is a good balance)',
+                  foreground=COLORS['skip']).pack(side='left')
         ttk.Checkbutton(f, text='For a video link inside a playlist, download only that video',
                         variable=self.no_playlist).grid(row=next(row), column=0, sticky='w', pady=(8, 0))
         ttk.Checkbutton(f, text='Also keep the original audio file (Opus/M4A, not re-encoded)',
@@ -110,7 +125,8 @@ class App:
         ttk.Label(buttons, text='Ctrl+Enter', foreground=COLORS['skip']).pack(side='left', padx=(12, 0))
 
         ttk.Label(f, textvariable=self.status, font=bold).grid(row=next(row), column=0, sticky='w')
-        ttk.Label(f, textvariable=self.detail, foreground=COLORS['skip']).grid(row=next(row), column=0, sticky='w')
+        ttk.Label(f, textvariable=self.detail, foreground=COLORS['skip'],
+                  justify='left').grid(row=next(row), column=0, sticky='w')
         self.bar = ttk.Progressbar(f, maximum=100)
         self.bar.grid(row=next(row), column=0, sticky='ew', pady=(6, 10))
 
@@ -155,7 +171,8 @@ class App:
 
     def settings(self) -> dict:
         return {'out': self.out.get().strip(), 'vbr': self.vbr.get(),
-                'keep_source': self.keep_source.get(), 'no_playlist': self.no_playlist.get()}
+                'keep_source': self.keep_source.get(), 'no_playlist': self.no_playlist.get(),
+                'workers': job.clamp_workers(self.workers.get())}
 
     def start(self) -> None:
         if self.job and self.job.running:
@@ -180,8 +197,8 @@ class App:
         self.log.configure(state='disabled')
         for word in rejected:
             self.append('error', f'Ignored, not a link: {word}')
-        self.job = job.DownloadJob(urls, Path(s['out']), vbr=s['vbr'], keep_source=s['keep_source'],
-                                   no_playlist=s['no_playlist']).start()
+        self.job = job.DownloadJob(urls, Path(s['out']), workers=s['workers'], vbr=s['vbr'],
+                                   keep_source=s['keep_source'], no_playlist=s['no_playlist']).start()
         self.log_next = 0
         self.start_btn.configure(state='disabled')
         self.cancel_btn.configure(state='normal')
@@ -208,15 +225,19 @@ class App:
         for kind, text in s['log']:
             self.append(kind, text)
         if s['state'] in ('running', 'cancelling'):
-            counter = f"{s['item']} of {s['count']} · " if s['count'] else ''
-            percent = f" {s['percent']:.0f}%" if s['percent'] is not None else ''
-            self.status.set(f"{counter}{s['phase']}{percent}")
-            self.detail.set(s['title'] or s['playlist'])
+            if s['state'] == 'cancelling':
+                status = 'Cancelling… (tracks being converted are finished first)'
+            elif s['total']:
+                status = f"{s['done']} of {s['total']} done" + (' · finding more…' if s['searching'] else '')
+            else:
+                status = 'Finding videos…'
+            self.status.set(status)
+            self.detail.set('\n'.join(track_line(a) for a in s['active']))
             self.set_bar(s['percent'])
             self.root.title(f"{s['percent']:.0f}% · {TITLE}" if s['percent'] is not None else TITLE)
             self.root.after(self.POLL_MS, self.poll)
         else:
-            self.status.set(s['phase'])
+            self.status.set(s['message'])
             self.detail.set(f"Saved in {s['out']}" if s['new'] else '')
             self.set_bar(100.0 if s['state'] == 'done' else 0.0)
             self.root.title(TITLE)

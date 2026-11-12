@@ -123,6 +123,22 @@
   .check input { margin-top: 4px; }
   input[type=radio], input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 
+  .field.inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  select {
+    font: inherit; color: inherit; background: var(--field);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+  select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+  .active { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 8px; }
+  .active:empty { display: none; }
+  .active li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; font-size: 14px; }
+  .active .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .active .p { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .active .mini { grid-column: 1 / -1; height: 4px; border-radius: 99px; background: var(--track); overflow: hidden; }
+  .active .mini > div { height: 100%; background: var(--accent); opacity: .7; transition: width .25s ease; }
+  .active .mini.busy > div { width: 30%; animation: slide 1.3s ease-in-out infinite; }
+
   .actions { display: flex; align-items: center; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
   .hint { font-size: 13px; }
   .form-error { color: var(--error); margin: 12px 0 0; }
@@ -140,7 +156,9 @@
   .bar.done > div { background: var(--ok); }
   .bar.busy > div { width: 30%; animation: slide 1.3s ease-in-out infinite; }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-  @media (prefers-reduced-motion: reduce) { .bar.busy > div { animation: none; width: 100%; opacity: .4; } }
+  @media (prefers-reduced-motion: reduce) {
+    .bar.busy > div, .active .mini.busy > div { animation: none; width: 100%; opacity: .4; }
+  }
 
   .log {
     list-style: none; margin: 0; padding: 10px 12px;
@@ -210,6 +228,12 @@
       </div>
     </fieldset>
 
+    <div class="field inline">
+      <label class="label" for="workers">At once</label>
+      <select id="workers"></select>
+      <span class="muted hint">tracks at a time. 3–4 is a good balance; many more can get you blocked by YouTube.</span>
+    </div>
+
     <label class="check"><input type="checkbox" id="no_playlist">
       <span>For a video link inside a playlist, download only that video</span></label>
     <label class="check"><input type="checkbox" id="keep_source">
@@ -229,6 +253,7 @@
       <span class="muted" id="detail"></span>
     </div>
     <div class="bar" id="bar"><div></div></div>
+    <ul class="active" id="active"></ul>
     <ul class="log" id="log"></ul>
   </section>
 </main>
@@ -302,20 +327,42 @@ function render(job) {
 
   const running = job.state === 'running' || job.state === 'cancelling';
   if (running) {
-    const counter = job.count ? `${job.item} of ${job.count} · ` : '';
-    const percent = job.percent === null ? '' : ` ${Math.round(job.percent)}%`;
-    $('status').textContent = counter + job.phase + percent;
-    $('detail').textContent = job.title || job.playlist || '';
+    $('status').textContent = job.state === 'cancelling'
+      ? 'Cancelling… (tracks being converted are finished first)'
+      : job.total ? `${job.done} of ${job.total} done${job.searching ? ' · finding more…' : ''}` : 'Finding videos…';
+    $('detail').textContent = `${job.workers} at a time`;
     setBar(job.percent, job.state);
     document.title = job.percent === null ? TITLE : `${Math.round(job.percent)}% · ${TITLE}`;
   } else {
-    $('status').textContent = job.phase;
+    $('status').textContent = job.message;
     $('detail').textContent = job.new ? `Saved in ${job.out}` : '';
     setBar(job.state === 'done' ? 100 : 0, job.state);
     document.title = TITLE;
   }
+  renderActive(running ? job.active : []);
   setRunning(running);
   return running;
+}
+
+// One row per track being worked on: title, what it's doing, and its own small bar.
+function renderActive(tracks) {
+  $('active').replaceChildren(...tracks.map((track) => {
+    const li = document.createElement('li');
+    const title = document.createElement('span');
+    title.className = 't';
+    title.textContent = track.title;
+    title.title = track.title;
+    const phase = document.createElement('span');
+    phase.className = 'p';
+    phase.textContent = track.phase + (track.percent === null ? '' : ` ${Math.round(track.percent)}%`);
+    const mini = document.createElement('div');
+    mini.className = track.percent === null ? 'mini busy' : 'mini';
+    const fill = document.createElement('div');
+    if (track.percent !== null) fill.style.width = `${track.percent}%`;
+    mini.append(fill);
+    li.append(title, phase, mini);
+    return li;
+  }));
 }
 
 async function poll() {
@@ -338,6 +385,7 @@ async function start() {
       vbr: document.querySelector('input[name=quality]:checked').value === 'vbr',
       no_playlist: $('no_playlist').checked,
       keep_source: $('keep_source').checked,
+      workers: Number($('workers').value),
     });
     jobId = res.id;
     logNext = 0;
@@ -400,6 +448,8 @@ $('open').addEventListener('click', async () => {
     document.querySelector(`input[name=quality][value="${s.vbr ? 'vbr' : '320'}"]`).checked = true;
     $('no_playlist').checked = s.no_playlist;
     $('keep_source').checked = s.keep_source;
+    for (let n = 1; n <= state.max_workers; n++) $('workers').add(new Option(String(n), String(n)));
+    $('workers').value = String(s.workers);
     showProblems(state.blocking, state.warnings);
     if (state.job && render(state.job)) poll();  // a download started earlier, e.g. before a reload
   } catch (e) {

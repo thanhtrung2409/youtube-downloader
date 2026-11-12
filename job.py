@@ -1,8 +1,9 @@
 """Background download job and saved settings, shared by the desktop and web apps.
 
-A DownloadJob runs yt2mp3.download() on its own thread and turns yt-dlp's
-messages and hooks into a small progress state. A UI starts the job, polls
-snapshot() a few times a second, and may call cancel().
+A DownloadJob runs yt2mp3.download() on its own thread and keeps a small progress
+state: how many tracks were found and finished, and what each worker is doing
+right now. A UI starts the job, polls snapshot() a few times a second, and may
+call cancel().
 """
 
 import itertools
@@ -15,7 +16,15 @@ from pathlib import Path
 import yt2mp3
 
 SETTINGS_FILE = Path(os.environ.get('APPDATA') or Path.home()) / 'yt2mp3' / 'settings.json'
-DEFAULT_SETTINGS = {'out': str(yt2mp3.DEFAULT_OUT), 'vbr': False, 'keep_source': False, 'no_playlist': False}
+DEFAULT_SETTINGS = {'out': str(yt2mp3.DEFAULT_OUT), 'vbr': False, 'keep_source': False, 'no_playlist': False,
+                    'workers': yt2mp3.DEFAULT_WORKERS}
+
+
+def clamp_workers(value) -> int:
+    try:
+        return max(1, min(yt2mp3.MAX_WORKERS, int(value)))
+    except (TypeError, ValueError):
+        return yt2mp3.DEFAULT_WORKERS
 
 
 def load_settings() -> dict:
@@ -23,7 +32,9 @@ def load_settings() -> dict:
         saved = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         saved = {}
-    return {k: saved[k] if isinstance(saved.get(k), type(v)) else v for k, v in DEFAULT_SETTINGS.items()}
+    settings = {k: saved[k] if type(saved.get(k)) is type(v) else v for k, v in DEFAULT_SETTINGS.items()}
+    settings['workers'] = clamp_workers(settings['workers'])
+    return settings
 
 
 def save_settings(settings: dict) -> None:
@@ -43,48 +54,46 @@ def parse_urls(text: str) -> tuple[list[str], list[str]]:
 
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
-PLAYLIST = re.compile(r'^\[download\] Downloading playlist: (.+)$')
-ITEM = re.compile(r'^\[download\] Downloading item (\d+) of (\d+)$')
 # yt-dlp post-processor keys -> what the user sees while it runs.
 PHASES = {'ExtractAudio': 'Converting to MP3', 'Metadata': 'Adding tags', 'EmbedThumbnail': 'Adding cover art'}
+# How far along a track is, for the overall progress bar: downloading counts for up to
+# DOWNLOAD_SHARE of it, and converting/tagging for the rest.
+DOWNLOAD_SHARE = 0.6
 
 _ids = itertools.count(1)
 
 
 class _Logger:
-    """yt-dlp logger that feeds a job. yt-dlp sends normal output to debug()."""
+    """yt-dlp logger: keep errors, drop the chatter (progress comes from the hooks)."""
 
     def __init__(self, job: 'DownloadJob'):
         self.job = job
 
     def debug(self, msg: str) -> None:
-        if not msg.startswith('[debug] '):
-            self.job._on_message(ANSI.sub('', msg))
+        pass
 
-    info = debug
-
-    def warning(self, msg: str) -> None:
-        pass  # mostly format noise; missing tools are checked up front instead
+    info = warning = debug
 
     def error(self, msg: str) -> None:
-        self.job._on_error(ANSI.sub('', msg).removeprefix('ERROR: '))
+        self.job._add('error', ANSI.sub('', msg).removeprefix('ERROR: '))
 
 
-class DownloadJob:
-    def __init__(self, urls: list[str], out: Path, **options):
+class DownloadJob(yt2mp3.Reporter):
+    def __init__(self, urls: list[str], out: Path, workers: int = yt2mp3.DEFAULT_WORKERS, **options):
         self.id = next(_ids)
-        self.urls, self.out, self.options = urls, Path(out).expanduser().resolve(), options
+        self.urls, self.options = urls, options
+        self.out = Path(out).expanduser().resolve()
+        self.workers = clamp_workers(workers)
         self.state = 'running'    # running, cancelling, done, cancelled, failed
-        self.phase = 'Starting'
-        self.title = ''
-        self.playlist = ''
-        self.item = self.count = 0
-        self.percent: float | None = None  # None while the current step can't be measured
+        self.message = ''         # the final summary
+        self.total = self.new = self.skipped = self.failed_count = 0
+        self.links_left = len(urls)  # links not yet turned into tracks: more may be coming
+        self.active: dict[int, dict] = {}  # worker thread -> {title, phase, percent, order}
+        self.playlists: set[str] = set()
         self.log: list[tuple[str, str]] = []  # (kind, text); kind is info, ok, skip or error
-        self.new = self.skipped = self.errors = 0
+        self._order = itertools.count()
         self._lock = threading.Lock()
         self._cancel = threading.Event()
-        self._partial: list[str] = []  # files of the track that was cancelled mid-download
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> 'DownloadJob':
@@ -98,105 +107,97 @@ class DownloadJob:
     def cancel(self) -> None:
         with self._lock:
             if self.state == 'running':
-                self.state, self.phase = 'cancelling', 'Cancelling…'
+                self.state = 'cancelling'
                 self._cancel.set()
 
     def snapshot(self, log_from: int = 0) -> dict:
         """Current state, with log lines from index log_from on."""
         with self._lock:
+            done = self.new + self.skipped + self.failed_count
+            active = sorted(self.active.values(), key=lambda a: a['order'])
+            in_flight = sum(a['share'] for a in active)
+            expected = self.total + self.links_left  # each unread link is at least one more track
             return {
-                'id': self.id, 'state': self.state, 'phase': self.phase, 'title': self.title,
-                'playlist': self.playlist, 'item': self.item, 'count': self.count,
-                'percent': self.percent, 'new': self.new, 'skipped': self.skipped,
-                'errors': self.errors, 'out': str(self.out),
+                'id': self.id, 'state': self.state, 'message': self.message, 'out': str(self.out),
+                'workers': self.workers, 'total': self.total, 'done': done, 'new': self.new,
+                'skipped': self.skipped, 'failed': self.failed_count, 'searching': self.links_left > 0,
+                'percent': min(100.0, 100 * (done + in_flight) / expected) if self.total else None,
+                'active': [{k: a[k] for k in ('title', 'phase', 'percent')} for a in active],
                 'log': [list(entry) for entry in self.log[log_from:]], 'log_next': len(self.log),
             }
 
-    # Everything below runs on the job's thread.
+    # Everything below runs on the job's or the workers' threads.
 
     def _add(self, kind: str, text: str) -> None:
         with self._lock:
             self.log.append((kind, text))
 
     def _run(self) -> None:
-        self._add('info', f'Saving to {self.out}')
-        cancelled = False
+        self._add('info', f'Saving to {self.out} ({self.workers} at a time)')
         try:
-            yt2mp3.download(self.urls, self.out, logger=_Logger(self), progress_hook=self._on_progress,
-                            postprocessor_hook=self._on_postprocess, on_file=self._on_file, **self.options)
-        except yt2mp3.yt_dlp.utils.DownloadCancelled:
-            cancelled = True
-        except Exception as e:  # anything else ends the job; show it rather than die silently
-            self._finish('failed', 'error', f'Stopped: {e}')
+            result = yt2mp3.download(self.urls, self.out, workers=self.workers, reporter=self,
+                                     logger=_Logger(self), cancel=self._cancel, **self.options)
+        except Exception as e:  # anything unexpected ends the job; show it rather than die silently
+            return self._finish('failed', 'error', f'Stopped: {e}')
+        parts = [f'{len(result.new)} new']
+        if result.skipped:
+            parts.append(f'{len(result.skipped)} already downloaded')
+        if result.failed:
+            parts.append(f'{len(result.failed)} failed')
+        if result.cancelled:
+            self._finish('cancelled', 'info', 'Cancelled: ' + ', '.join(parts) + '.')
         else:
-            parts = [f'{self.new} new']
-            if self.skipped:
-                parts.append(f'{self.skipped} already downloaded')
-            if self.errors:
-                parts.append(f'{self.errors} failed')
-            self._finish('done', 'error' if self.errors and not self.new else 'info',
+            self._finish('done', 'error' if result.failed and not result.new else 'info',
                          'Finished: ' + ', '.join(parts) + '.')
-        if cancelled:
-            # Only now is yt-dlp's handle on the partial file closed, so Windows lets us delete it.
-            for f in self._partial:
-                try:
-                    Path(f).unlink(missing_ok=True)
-                except OSError:
-                    pass
-            self._finish('cancelled', 'info', 'Cancelled.')
 
     def _finish(self, state: str, kind: str, text: str) -> None:
         with self._lock:
-            self.state, self.phase, self.percent = state, text, None
+            self.state, self.message = state, text
+            self.active.clear()
             self.log.append((kind, text))
 
-    def _on_message(self, msg: str) -> None:
-        if m := PLAYLIST.match(msg):
-            with self._lock:
-                self.playlist = m[1]
-            self._add('info', f'Playlist: {m[1]}')
-        elif m := ITEM.match(msg):
-            with self._lock:
-                self.item, self.count, self.title = int(m[1]), int(m[2]), ''
-                if not self._cancel.is_set():
-                    self.phase, self.percent = 'Reading video info', None
-        elif msg.startswith('[youtube] Extracting URL'):
-            with self._lock:
-                if not self._cancel.is_set():
-                    self.phase, self.percent = 'Reading video info', None
+    def _mine(self) -> dict | None:
+        return self.active.get(threading.get_ident())
 
-    def _on_error(self, msg: str) -> None:
-        with self._lock:
-            self.errors += 1
-            self.log.append(('error', msg))
+    # yt2mp3.Reporter
 
-    def _on_progress(self, d: dict) -> None:
-        if self._cancel.is_set():
-            # Stop here, while the track is still downloading, and remember what to delete.
-            # Never the final MP3: an already-downloaded track also reports progress.
-            if name := d.get('filename'):
-                stem = Path(name)
-                self._partial = [d.get('tmpfilename') or name + '.part', name + '.ytdl',
-                                 *(str(stem.with_suffix(ext)) for ext in ('.webp', '.jpg', '.png'))]
-                self._partial = [f for f in self._partial if not f.lower().endswith('.mp3')]
-            raise yt2mp3.yt_dlp.utils.DownloadCancelled('Cancelled by user')
+    def planned(self, title, playlist):
         with self._lock:
-            self.title = (d.get('info_dict') or {}).get('title') or self.title
+            self.total += 1
+            if playlist and playlist not in self.playlists:
+                self.playlists.add(playlist)
+                self.log.append(('info', f'Playlist: {playlist}'))
+
+    def link_done(self):
+        with self._lock:
+            self.links_left -= 1
+
+    def started(self, title, phase='Reading video info'):
+        with self._lock:
+            self.active[threading.get_ident()] = {'title': title, 'phase': phase,
+                                                  'percent': None, 'share': 0.0, 'order': next(self._order)}
+
+    def progress(self, d):
+        with self._lock:
+            if not (a := self._mine()):
+                return
+            a['title'] = (d.get('info_dict') or {}).get('title') or a['title']
             if d['status'] == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate')
-                self.phase = 'Downloading'
-                self.percent = min(100.0, 100 * (d.get('downloaded_bytes') or 0) / total) if total else None
+                a['phase'] = 'Downloading'
+                a['percent'] = min(100.0, 100 * (d.get('downloaded_bytes') or 0) / total) if total else None
+                a['share'] = DOWNLOAD_SHARE * (a['percent'] or 0) / 100
             elif d['status'] == 'finished':
-                self.percent = 100.0
+                a['percent'], a['share'] = 100.0, DOWNLOAD_SHARE
 
-    def _on_postprocess(self, d: dict) -> None:
-        # A cancel during conversion lets this track finish (no half-tagged MP3s);
-        # it takes effect when the next track starts downloading.
-        if d['status'] == 'started' and d['postprocessor'] in PHASES and not self._cancel.is_set():
+    def postprocess(self, d):
+        if d['status'] == 'started' and d['postprocessor'] in PHASES:
             with self._lock:
-                self.phase, self.percent = PHASES[d['postprocessor']], None
+                if a := self._mine():
+                    a['phase'], a['percent'] = PHASES[d['postprocessor']], None
+                    a['share'] = max(a['share'], DOWNLOAD_SHARE)
 
-    def _on_file(self, path: str, is_new: bool) -> None:
+    def saved(self, path, is_new):
         rel = os.path.relpath(path, self.out)
         with self._lock:
             if is_new:
@@ -205,3 +206,13 @@ class DownloadJob:
             else:
                 self.skipped += 1
                 self.log.append(('skip', f'{rel} (already downloaded)'))
+            if a := self._mine():
+                a['share'] = 0.0  # now counted in done
+
+    def failed(self, title):
+        with self._lock:
+            self.failed_count += 1
+
+    def ended(self):
+        with self._lock:
+            self.active.pop(threading.get_ident(), None)

@@ -61,7 +61,8 @@ class App:
         with self.lock:
             current = self.job
         snapshot = current.snapshot(log_from if current.id == job_id else 0) if current else None
-        return {'settings': job.load_settings(), 'blocking': blocking, 'warnings': warnings, 'job': snapshot}
+        return {'settings': job.load_settings(), 'max_workers': yt2mp3.MAX_WORKERS,
+                'blocking': blocking, 'warnings': warnings, 'job': snapshot}
 
     def start(self, body: dict) -> tuple[int, dict]:
         urls, rejected = job.parse_urls(str(body.get('urls', '')))
@@ -74,12 +75,13 @@ class App:
         if blocking:
             return 400, {'error': ' '.join(blocking)}
         settings = {'out': out, 'vbr': body.get('vbr') is True, 'keep_source': body.get('keep_source') is True,
-                    'no_playlist': body.get('no_playlist') is True}
+                    'no_playlist': body.get('no_playlist') is True, 'workers': job.clamp_workers(body.get('workers'))}
         with self.lock:
             if self.job and self.job.running:
                 return 409, {'error': 'A download is already running.'}
             job.save_settings(settings)
-            self.job = job.DownloadJob(urls, Path(out), vbr=settings['vbr'], keep_source=settings['keep_source'],
+            self.job = job.DownloadJob(urls, Path(out), workers=settings['workers'], vbr=settings['vbr'],
+                                       keep_source=settings['keep_source'],
                                        no_playlist=settings['no_playlist']).start()
             return 200, {'id': self.job.id, 'rejected': rejected}
 
