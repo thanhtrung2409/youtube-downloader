@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Downloads, if you point -o at this folder
+*.mp3
+*.m4a
+*.opus
+*.webm
