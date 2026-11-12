@@ -3,14 +3,14 @@
 **YouTube to MP3** downloads YouTube videos and playlists as the highest-quality MP3: it takes the best available audio stream and encodes it once at 320 kbps, with title, artist, chapters and cover art embedded.
 
 - **One video** is saved straight into the folder you choose.
-- **A playlist or channel** gets its own folder, named after it, with numbered tracks.
+- **A playlist or channel** gets its own folder, named after it.
 
 ```text
 Music/yt2mp3/
 ├── Some Song.mp3
 └── My Playlist/
-    ├── 01 - First song.mp3
-    ├── 02 - Second song.mp3
+    ├── First song.mp3
+    ├── Second song.mp3
     └── ...
 ```
 

@@ -7,10 +7,10 @@ or 256 kbps for Premium accounts with cookies), encodes it once with LAME at
 and cover art.
 
 A single video is saved straight into the output folder. A playlist (or a
-channel) gets its own sub-folder named after it, with numbered tracks:
+channel) gets its own sub-folder named after it:
 
   ~/Music/yt2mp3/Song.mp3
-  ~/Music/yt2mp3/My Playlist/01 - First song.mp3
+  ~/Music/yt2mp3/My Playlist/First song.mp3
 
 Usage:
   py yt2mp3.py URL [URL ...]          videos, playlists or channels
@@ -48,9 +48,9 @@ except ImportError:  # reported by missing_requirements()
 
 DEFAULT_OUT = Path.home() / 'Music' / 'yt2mp3'
 
-# Playlist items go to "<playlist title>/<index> - <title>"; a single video has no
+# Playlist items go to "<playlist title>/<title>"; a single video has no
 # playlist_title, so the folder falls back to "." (the output folder itself).
-TEMPLATE = '%(playlist_title|.)s/%(playlist_index&{:02d} - |)s%(title)s.%(ext)s'
+TEMPLATE = '%(playlist_title|.)s/%(title)s.%(ext)s'
 
 
 def refresh_path() -> None:
